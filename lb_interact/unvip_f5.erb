@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Ted Kozma
+# DESC: call F5 and disable the host in the given pool.
+# 2017
+<% if @f5_port -%>
+/usr/local/bin/f5_call.py -H <%= @f5_hostname -%> -U <%= @f5_username -%> -W <%= @f5_password -%> -P <%= @f5_pool -%> -N <%= @fqdn -%> -p <%= @f5_port -%> -A disable
+<% else -%>
+/usr/local/bin/f5_call.py -H <%= @f5_hostname -%> -U <%= @f5_username -%> -W <%= @f5_password -%> -P <%= @f5_pool -%> -N <%= @fqdn -%> -A disable
+<% end -%>

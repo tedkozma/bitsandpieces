@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Ted Kozma
+# "band-aid" temp solution: daemon watching the scrape-api
+# when health check fails: stop, clean pub-subs, start, revip when health passes
+# 2022
+
+LIMIT=6000
+SLEEP_BETWEEN_RUNS=60
+
+usage() {
+  echo "Usage: $SCRIPT [-h] [ -d ]"
+  echo ""
+  echo "OPTIONS"
+  echo "-h    -- Output this usage info and exit"
+  echo "-d    -- Debug mode"
+  echo ""
+  exit
+}
+
+# Parse options
+while getopts "hd" opt; do
+  case $opt in
+    d)
+      DEBUG=1
+    ;;
+    h)
+        usage
+    ;;
+    \?)
+        die "Invalid option: -$OPTARG, use -h for help"
+    ;;
+  esac
+done
+
+function :health {
+  R=$(curl -s -f --connect-timeout 1 -m 1 http://localhost:5000/health >/dev/null; echo $?)
+  echo $R
+}
+
+function  :unvip_and_stop {
+  :debug_print "Removing <%= @fqdn -%> from pool"
+  /usr/local/bin/unvip noemail longdrain
+  /usr/bin/supervisorctl stop api vnc
+  sleep 5
+  pkill -9 dotnet
+  pkill -9 chrome
+  return 0
+}
+
+function :start_and_revip {
+  /usr/bin/supervisorctl start api vnc
+  touch /tmp/check_scrape_restart.marker
+  sleep 4
+  /usr/local/bin/revip noemail
+}
+
+function :clean_subs () {
+  /usr/bin/gcloud config set project company-production
+  L=$(/usr/bin/gcloud pubsub subscriptions list|grep -E -- "-<%= @hostname -%>-" | cut -d/ -f4)
+  for K in $L; do
+    /usr/bin/gcloud pubsub subscriptions delete $K
+  done
+}
+
+function :haproxy_rtime {
+  RTIME=$(echo "show stat" | nc 172.26.208.221 9999 | awk -F, '/scrapeapi_backend,<%= @fqdn -%>/{print $61}')
+  echo $RTIME
+}
+
+function :debug_print {
+  if [[ $DEBUG -eq 1 ]]; then
+    echo "$1"
+  fi
+}
+
+function :last_restart_age {
+  if [ -f /tmp/check_scrape_restart.marker ]; then
+    AGE=$(( $(date +%s) - $(date -r /tmp/check_scrape_restart.marker +%s) ))
+  else
+    AGE=999999
+  fi
+  echo $AGE
+}
+
+while :; do
+  LIMIT=12000
+  R=$(:health)
+  :debug_print "Health is $R"
+  RTIME=$(:haproxy_rtime)
+  :debug_print "Response time is $RTIME"
+  if [[ $R -ne 0 ]]; then
+    :debug_print "Health check is not responding, restarting"
+    :unvip_and_stop
+    :clean_subs
+    :start_and_revip
+    sleep $SLEEP_BETWEEN_RUNS
+  elif (( $RTIME > $LIMIT )); then
+    LAST_RESTART_AGE=$(:last_restart_age)
+    if [[ $LAST_RESTART_AGE -gt 300 ]]; then
+      :debug_print "Response time $RTIME is higher than ${LIMIT}, restarting"
+      :debug_print "Last restart was $LAST_RESTART_AGE seconds ago"
+      :unvip_and_stop
+      :clean_subs
+      :start_and_revip
+      sleep $SLEEP_BETWEEN_RUNS
+    else
+      :debug_print "Last restart was less than $LAST_RESTART_AGE seconds ago, skipping"
+    fi
+  else
+    :debug_print "looks ok, will check in $SLEEP_BETWEEN_RUNS seconds"
+    sleep $SLEEP_BETWEEN_RUNS
+  fi
+done

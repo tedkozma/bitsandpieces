@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# Ted Kozma
+# DESC: call haproxy hosts via tcp admin socket and enable the host in all pools
+# 2020
+
+port="9999"
+
+<% if @haproxy_pair -%>
+<% if !@haproxy_pair.empty? -%>
+lbs="<%= @haproxy_pair -%>"
+<% end -%>
+<% else -%>
+lbs=<%= @haproxy_host -%>
+<% end -%>
+
+declare -A lb_pool
+for L in $lbs; do
+  P=$(echo "show stat" | nc $L $port | perl -F, -lane '{print "$F[0]/$F[1]" if m/'<%= @fqdn -%>'/}');
+  if [[ ! -z "$P" ]]; then
+    lb_pool[$L]=$P
+  fi
+done
+
+if [[ -z "${lb_pool[@]}" ]]; then
+  echo "Host is not in any pool, not revipping"
+  exit 1
+fi
+
+for lb in "${!lb_pool[@]}"; do
+  pools_servers="${lb_pool[$lb]}"
+  echo "$pools_servers"|while read PS; do
+    echo "Enabling $PS in $lb..."
+    echo "enable server ${PS}" | nc $lb $port
+  done
+done
+sleep 1
+
+#logger
+user=`who am i`
+test -z "$user" && user="Daemon"
+logger $user revipped the host
+
+if [ "$1" != "noemail" ]
+then
+  host=`hostname -f`
+  message="$host has been revipped by $user"
+  echo $message | mailx -s "$host has been revipped" alerts.sre@company.com
+fi
+
+for lb in $lbs; do
+  A=$(echo "show stat" | nc $lb $port | perl -F, -lane '{print "Node $F[1] in pool: $F[0] is: $F[17], weight=$F[18], limit=$F[6], rate=$F[33]" if m/'<%= @fqdn -%>'/}')
+  echo "$A"|while read LINE; do
+    echo $lb: "$LINE"
+  done
+done
+

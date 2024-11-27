@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Ted Kozma
+# call haproxy, drain and set the host in maint mode
+# 2020
+
+port="9999"
+<% if @haproxy_pair -%>
+<% if !@haproxy_pair.empty? -%>
+lbs="<%= @haproxy_pair -%>"
+<% end -%>
+<% else -%>
+lbs=<%= @haproxy_host -%>
+<% end -%>
+
+unset NOEMAIL NODRAIN LONGDRAIN DRAINTIME
+
+if [[ $# > 0 ]]; then
+  for ARG in "$@"; do
+    if [[ "$ARG" = 'nodrain' ]]; then
+      NODRAIN=1
+    elif [[ "$ARG" = 'noemail' ]]; then
+      NOEMAIL=1
+    elif [[ "$ARG" = 'longdrain' ]]; then
+      LONGDRAIN=1
+    fi
+  done
+fi
+
+declare -A lb_pool
+for L in $lbs; do
+  P=$(echo "show stat" | nc $L $port | perl -F, -lane '{print "$F[0]/$F[1]" if m/'<%= @fqdn -%>'/}');
+  if [[ ! -z "$P" ]]; then
+    lb_pool[$L]=$P
+  fi
+done
+
+if [[ -z "${lb_pool[@]}" ]]; then
+  echo "Host is not in any pool, nowhere to unvip from"
+  exit 1
+fi
+
+if [[ -z "$LONGDRAIN" ]]; then
+  DRAINTIME=30
+else
+  DRAINTIME=60
+fi
+
+if [[ -z "$NODRAIN" ]]; then
+  # First set the host to drain:
+  for lb in "${!lb_pool[@]}"; do
+    pools_servers="${lb_pool[$lb]}"
+    echo "$pools_servers"|while read PS; do
+      echo "set server ${PS} state drain" | nc $lb $port
+    done
+  done
+  # wait ${DRAINTIME} seconds
+  echo "Waiting ${DRAINTIME} seconds to drain..."
+  sleep ${DRAINTIME}
+fi
+
+for lb in "${!lb_pool[@]}"; do
+  pools_servers="${lb_pool[$lb]}"
+  echo "$pools_servers"|while read PS; do
+    echo "Disabling ${PS} in $lb..."
+    echo "disable server ${PS}" | nc $lb $port
+  done
+done
+sleep 1
+
+#logger
+user=`who am i`
+test  -z "$user"  && user="Daemon"
+logger $user unvipped the host
+
+if ! [ $NOEMAIL ]; then
+  host=`hostname -f`
+  message="$host has been unvipped by $user"
+  echo $message | mailx -s "$host has been unvipped" alerts.sre@company.com
+fi
+
+for lb in $lbs; do
+  A=$(echo "show stat" | nc $lb $port | perl -F, -lane '{print "Node $F[1] in pool: $F[0] is: $F[17], weight=$F[18], limit=$F[6], rate=$F[33]" if m/'<%= @fqdn -%>'/}')
+  echo "$A"|while read LINE; do
+    echo $lb: "$LINE"
+  done
+done
+

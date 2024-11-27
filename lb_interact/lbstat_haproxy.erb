@@ -1,0 +1,21 @@
+#!/bin/bash
+# Ted Kozma
+# Call haproxy hosts and get the status of the given server 
+# 2020
+#
+port="9999"
+
+<% if @haproxy_pair -%>
+<% if !@haproxy_pair.empty? -%>
+lbs="<%= @haproxy_pair %>"
+<% end -%>
+<% else -%>
+lbs=<%= @haproxy_host %>
+<% end -%>
+
+for lb in $lbs; do
+  A=$(echo "show stat" | nc $lb $port | perl -F, -lane '{print "Node $F[1] in pool: $F[0] is: $F[17], weight=$F[18], limit=$F[6], rate=$F[33]" if m/'<%= @fqdn -%>'/}')
+  echo "$A"|while read LINE; do
+    echo $lb: $LINE
+  done
+done
